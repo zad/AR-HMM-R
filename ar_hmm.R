@@ -1,35 +1,200 @@
 # ar_hmm 
-# input: a list of time series (y)
-ar_hmm <- function(){
-  print("ar_hmm")
-}
+# requirments:
 
-# generate time series based on input parameters
-genTS(N,S,pi,A,V){
+# Markov Chain functions
+mc.sample <- function(TM, pre_state){
+  if(pre_state <0){
+    # this is the initial state
+    state <- sample_mul(rep(1.0/nrow(TM),nrow(TM)))
+  }else{
+    state <- sample_mul(TM[pre_state,])
+  }
   
+  #print(state)
+  return(state)
 }
 
-# number of time series
-NT = 10
-# length of a time series
-N = 100
-# generate dummy data
-# number of states
-S = 3
-# transition matrix
-pi <- matrix(
-  c(0.5, 0.1, 0.4, 0.5, 0.2, 0.3, 0.2, 0.3, 0.5),
-  3,3
-)
-
-# AR parameters
-A = c(-1, 0, 2)
-V = c(0.1, 0.1, 0.2)
-
-listTS <- list()
-for(i in 1:NT){
-  print(paste0("generate time series:",i))
-  listTS(i) <- genTS(N,S,pi,A,V)
+# multinormial sampling
+sample_mul <- function(p){
+  sample <- rmultinom(1,size=1,prob=p)
+  return(match(1,sample))
 }
 
-ar_hmm()
+
+# learn parameters by using AR-HMM model
+ar_hmm.learn <- function(obs,NS,T){
+  print("ar_hmm.learn")
+  # randomly initialize states
+  states <- initStates(obs,NS)
+  # use Gibbs sampling
+  for(t in 1:T){
+    print(paste("Iteration:",t))
+    # update state variables
+    NTS <- length(obs)
+    # counter for transition matrix
+    TM_C <- matrix(rep(0,NS*NS),NS,NS)
+    Y = list()
+    X = list()
+    for(i in 1:NTS){
+      N <- length(obs[[i]])
+      for(j in 1:N){
+        if(j>1){
+          cur_s = states[[i]][j]
+          pre_s = states[[i]][j-1]
+          TM_C[pre_s,cur_s] = TM_C[pre_s,cur_s] + 1
+        }
+      }
+      for(s in 1:NS){
+        y_idx = which(states[[i]]==s)  
+        y_idx = y_idx[y_idx > 1]
+        y = obs[[i]][y_idx]
+        x = obs[[i]][y_idx-1]
+        if(i == 1)
+        {
+          Y[[s]] = y
+          X[[s]] = x
+        }
+        else
+        {
+          Y[[s]] = append(Y[[s]],y)
+          X[[s]] = append(X[[s]],x)
+        }
+      }
+    }
+    # learn transition matrix
+    pi <- learnTM(TM_C)
+    # learn AR parameters
+    #print(Y[[1]])
+    ar <- learnAR(Y,X)
+    # TODO use pi, ar to update states
+    # TODO consider special case j = 1
+    for(i in 1:NTS){
+      N <- length(obs[[i]])
+      g_jp1 = rep(1,NS)
+      for(j in N:1){
+        prob_j = rep(1,NS)
+        g_j = rep(1,NS)
+        # update function g at j-th sample
+        for(s in 1:NS){
+          if(j==1)
+          {
+            # spercial case j=1
+            g_j[s] = sum(pi[s,]*g_jp1)
+          }
+          else
+          {
+            f1 = f(obs[[i]][j],obs[[i]][j-1],s,ar)
+            s1 = sum(pi[s,]*g_jp1)
+            g_j[s] = f1 * s1
+              
+          }
+        }
+        g_jp1 = g_j
+        # calculate Prob(s|s_pre,Y,pi)
+        print(g_j)
+        for(s in 1:NS){
+          if(j==1){
+            # spercial case j=1
+            prob_j[s] = g_j[s]
+          }else
+            prob_j[s] = pi[states[[i]][j-1],s] * g_j[s]
+        }
+        print(prob_j)
+        prob_j = prob_j/sum(prob_j)
+        # sampling new state at j
+        print(prob_j)
+        new_state = sample_mul(prob_j)
+        # update state
+        states[[i]][j] = new_state
+      }
+    }
+  }
+}
+
+# ar_hmm.gen
+# generate time series based on input parameters
+ar_hmm.gen <- function(N,S,pi,A,V){
+  listTS <- list(obs=list(),states=list())
+  for(i in 1:length(N)){
+    # generate i-th time series
+    n = N[i]
+    print(paste0("generate time series:",i
+                 ," num of samples:",n))
+    states <- rep(-1,n)
+    obs <- rep(0,n)
+    
+    for(j in 1:n){
+      # sample j-th state at i-th time series
+      print(paste0("sample ",j,"-th state at ",i,"-th time series"))
+      if(j == 1)
+        states[j] <- mc.sample(pi,-1)
+      else
+        states[j] <- mc.sample(pi,states[j-1])
+      # sample current observation by using AR-1
+      print(paste("state at", i, " ",n, ":", states[j]))
+      s = states[j]
+      a = A[[s]]
+      e = V[[s]]
+      
+      if(j == 1){
+        mu = a[1] # assume last observation is equal to a
+      }else{
+        mu = a[1] + a[2]*obs[j-1]
+      }
+      obs[j] = mu + e*rnorm(1)
+    }
+    listTS$states[[i]] <- states
+    listTS$obs[[i]] <- obs
+  }
+  return(listTS)
+}
+
+# randomly initialize states for each observation
+initStates <- function(obs,NS){
+  NTS = length(obs)
+  states = list()
+  for(i in 1:NTS){
+    NOBS = length(obs[[i]])
+    states[[i]] <- sample(NS,NOBS,replace=TRUE)
+  }
+  return(states)
+}
+
+# update transition matrix based on counters on states
+learnTM <- function(TM_C){
+  NS <- nrow(TM_C)
+  pi <- matrix(rep(0,NS*NS),NS,NS)
+  for(r in 1:NS){
+    sum_r = sum(TM_C[r,])
+    for(c in 1:NS){
+      pi[r,c] = TM_C[r,c]*1.0/sum_r
+    }
+  }
+  return(pi)
+}
+
+learnAR <- function(Y,X){
+  A = list()
+  V = list()
+  NS <- length(Y)
+  for(s in 1:NS){
+    y = Y[[s]]
+    x = X[[s]]
+    #print(y)
+    fit <- lm(y~x)
+    A[[s]] = fit$coefficients
+    V[[s]] = sd(fit$residuals)
+  }
+  ar <- list(A,V)
+  names(ar) = c("A","V")
+  return(ar)
+}
+
+
+f <- function(y,y_pre,s,ar){
+  A = ar$A[[s]]
+  V = ar$V[[s]]
+  x = A["(Intercept)"] + A["x"]*y_pre
+  prob = dnorm(y, mean = x, sd = V)
+  return(prob)
+}
