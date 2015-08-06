@@ -1,5 +1,10 @@
 # ar_hmm 
-# requirments:
+# limits:
+MIN_TM_C = 1
+MIN_V = 0.001
+MIN_PROB = 1e-10
+
+source("small_number.R")
 
 # Markov Chain functions
 mc.sample <- function(TM, pre_state){
@@ -27,12 +32,14 @@ ar_hmm.learn <- function(obs,NS,T){
   # randomly initialize states
   states <- initStates(obs,NS)
   # use Gibbs sampling
+  debug = TRUE
   for(t in 1:T){
     print(paste("Iteration:",t))
     # update state variables
     NTS <- length(obs)
+    print(paste("number of time series:",NTS))
     # counter for transition matrix
-    TM_C <- matrix(rep(0,NS*NS),NS,NS)
+    TM_C <- matrix(rep(MIN_TM_C,NS*NS),NS,NS)
     Y = list()
     X = list()
     for(i in 1:NTS){
@@ -65,50 +72,64 @@ ar_hmm.learn <- function(obs,NS,T){
     pi <- learnTM(TM_C)
     # learn AR parameters
     #print(Y[[1]])
-    ar <- learnAR(Y,X)
-    # TODO use pi, ar to update states
-    # TODO consider special case j = 1
+    ar <- learnAR(Y,X,debug)
+    # use pi, ar to update states
+    # (consider special case j = 1)
     for(i in 1:NTS){
       N <- length(obs[[i]])
-      g_jp1 = rep(1,NS)
+      g_jp1 = list(1,1,1)
       for(j in N:1){
-        prob_j = rep(1,NS)
-        g_j = rep(1,NS)
+        prob_j = list()
+        g_j = list()
         # update function g at j-th sample
         for(s in 1:NS){
           if(j==1)
           {
             # spercial case j=1
-            g_j[s] = sum(pi[s,]*g_jp1)
+            fx = 1
           }
           else
           {
-            f1 = f(obs[[i]][j],obs[[i]][j-1],s,ar)
-            s1 = sum(pi[s,]*g_jp1)
-            g_j[s] = f1 * s1
-              
+            fx = f(obs[[i]][j],obs[[i]][j-1],s,ar,debug)
           }
+          sx = c(0,0)
+          for(k in 1:NS){
+            smm = sn.multiply(pi[s,k], g_jp1[[k]])
+            sx = sn.add(sx, smm)
+          }
+          
+          if(debug)
+            print(c("fx,sx:",fx,sx))
+          
+          g_j[[s]] = sn.multiply(fx, sx)
+          print(paste("g_j[[s]]",g_j[[s]]))
+        
         }
         g_jp1 = g_j
         # calculate Prob(s|s_pre,Y,pi)
-        print(g_j)
+        if(debug)print(c("g_j:",g_j))
         for(s in 1:NS){
           if(j==1){
             # spercial case j=1
-            prob_j[s] = g_j[s]
-          }else
-            prob_j[s] = pi[states[[i]][j-1],s] * g_j[s]
+            prob_j[[s]] = g_j[[s]]
+          }else{
+            prob_j[[s]] = sn.multiply(pi[states[[i]][j-1],s], g_j[[s]])
+          }
+            
         }
-        print(prob_j)
-        prob_j = prob_j/sum(prob_j)
+        
+        prob_j <- normalize_prob(prob_j, MIN_PROB)
         # sampling new state at j
-        print(prob_j)
+        if(debug)print(prob_j)
         new_state = sample_mul(prob_j)
         # update state
         states[[i]][j] = new_state
       }
     }
   }
+  para <- list(states, ar, pi)
+  names(para) = c("states","AR", "pi")
+  return(para)
 }
 
 # ar_hmm.gen
@@ -133,13 +154,13 @@ ar_hmm.gen <- function(N,S,pi,A,V){
       # sample current observation by using AR-1
       print(paste("state at", i, " ",n, ":", states[j]))
       s = states[j]
-      a = A[[s]]
-      e = V[[s]]
+      a = A[s]
+      e = V[s]
       
       if(j == 1){
-        mu = a[1] # assume last observation is equal to a
+        mu = 0 # assume the previous observation is equal to 0
       }else{
-        mu = a[1] + a[2]*obs[j-1]
+        mu = a*obs[j-1]
       }
       obs[j] = mu + e*rnorm(1)
     }
@@ -170,31 +191,53 @@ learnTM <- function(TM_C){
       pi[r,c] = TM_C[r,c]*1.0/sum_r
     }
   }
+  print("pi:")
+  print(pi)
   return(pi)
 }
 
-learnAR <- function(Y,X){
-  A = list()
-  V = list()
+learnAR <- function(Y,X,debug){
   NS <- length(Y)
+  A = rep(0,NS)
+  V = rep(0,NS)
   for(s in 1:NS){
     y = Y[[s]]
     x = X[[s]]
-    #print(y)
-    fit <- lm(y~x)
-    A[[s]] = fit$coefficients
-    V[[s]] = sd(fit$residuals)
+    if(debug)print(paste("length y:",length(y)))
+    if(length(y) == 0){
+      A[s] = 1
+      V[s] = MIN_V
+    }
+    else if(length(y) == 1){
+      A[s] = y/x
+      V[s] = MIN_V
+    }else{
+      fit <- lm(y ~ 0 + x)
+      A[s] = fit$coefficients
+      V[s] = sd(fit$residuals)  
+      if(V[s] < MIN_V) V[S]=MIN_V
+    }
+    if(debug)print(paste("AR",s,"A:",A[s],"V:",V[s]))
   }
   ar <- list(A,V)
-  names(ar) = c("A","V")
+  names(ar) = c("A","V")  
   return(ar)
 }
 
 
-f <- function(y,y_pre,s,ar){
-  A = ar$A[[s]]
-  V = ar$V[[s]]
-  x = A["(Intercept)"] + A["x"]*y_pre
+f <- function(y,y_pre,s,ar,debug){
+  A = ar$A[s]
+  V = ar$V[s]
+  x = A*y_pre
   prob = dnorm(y, mean = x, sd = V)
+  if(debug)print(paste("y:",y,"x:",x,"y_pre:",y_pre,"A:",A,"V:",V))
   return(prob)
+}
+
+normalize_prob <- function(prob_sn, MIN_PROB){
+  # prob is a list of small number?
+  prob = sn.normalize(prob_sn)
+  prob = prob/sum(prob)
+  prob[prob<MIN_PROB] = MIN_PROB
+  return(prob/sum(prob))
 }
