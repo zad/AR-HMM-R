@@ -1,8 +1,8 @@
 # ar_hmm 
 # limits:
 MIN_TM_C = 1
-MIN_V = 0.001
-MIN_PROB = 1e-10
+MIN_V = 1e-5
+MIN_PROB = 1e-2 # 1%
 
 source("small_number.R")
 
@@ -27,19 +27,19 @@ sample_mul <- function(p){
 
 
 # learn parameters by using AR-HMM model
-ar_hmm.learn <- function(obs,NS,T){
+ar_hmm.learn <- function(obs,NS,NT,debug){
   print("ar_hmm.learn")
   # randomly initialize states
   states <- initStates(obs,NS)
   # use Gibbs sampling
-  debug = TRUE
-  for(t in 1:T){
+  loglikelihood = rep(0,NT)
+  for(t in 1:NT){
     print(paste("Iteration:",t))
     # update state variables
     NTS <- length(obs)
     print(paste("number of time series:",NTS))
     # counter for transition matrix
-    TM_C <- matrix(rep(MIN_TM_C,NS*NS),NS,NS)
+    TM_C <- matrix(rep(0,NS*NS),NS,NS)
     Y = list()
     X = list()
     for(i in 1:NTS){
@@ -102,7 +102,7 @@ ar_hmm.learn <- function(obs,NS,T){
             print(c("fx,sx:",fx,sx))
           
           g_j[[s]] = sn.multiply(fx, sx)
-          print(paste("g_j[[s]]",g_j[[s]]))
+          if(debug)print(paste("g_j[[s]]",g_j[[s]]))
         
         }
         g_jp1 = g_j
@@ -118,7 +118,7 @@ ar_hmm.learn <- function(obs,NS,T){
             
         }
         
-        prob_j <- normalize_prob(prob_j, MIN_PROB)
+        prob_j <- normalize_prob(prob_j)
         # sampling new state at j
         if(debug)print(prob_j)
         new_state = sample_mul(prob_j)
@@ -126,9 +126,11 @@ ar_hmm.learn <- function(obs,NS,T){
         states[[i]][j] = new_state
       }
     }
+    # calculate loglikelihood
+    loglikelihood[t] = get_loglikelihood(obs,states,pi,ar,debug)
   }
-  para <- list(states, ar, pi)
-  names(para) = c("states","AR", "pi")
+  para <- list(states, ar, pi, loglikelihood)
+  names(para) = c("states","AR", "pi", "LL")
   return(para)
 }
 
@@ -183,6 +185,7 @@ initStates <- function(obs,NS){
 
 # update transition matrix based on counters on states
 learnTM <- function(TM_C){
+  TM_C[TM_C==0] = MIN_TM_C
   NS <- nrow(TM_C)
   pi <- matrix(rep(0,NS*NS),NS,NS)
   for(r in 1:NS){
@@ -217,7 +220,7 @@ learnAR <- function(Y,X,debug){
       V[s] = sd(fit$residuals)  
       if(V[s] < MIN_V) V[S]=MIN_V
     }
-    if(debug)print(paste("AR",s,"A:",A[s],"V:",V[s]))
+    print(paste("AR",s,"A:",A[s],"V:",V[s]))
   }
   ar <- list(A,V)
   names(ar) = c("A","V")  
@@ -234,10 +237,32 @@ f <- function(y,y_pre,s,ar,debug){
   return(prob)
 }
 
-normalize_prob <- function(prob_sn, MIN_PROB){
-  # prob is a list of small number?
+normalize_prob <- function(prob_sn){
+  # prob is a list of small number
   prob = sn.normalize(prob_sn)
   prob = prob/sum(prob)
   prob[prob<MIN_PROB] = MIN_PROB
   return(prob/sum(prob))
+}
+
+
+get_loglikelihood <- function(obs,states,pi,ar,debug){
+  NTS = length(obs)
+  ll = 0
+  for(i in 1:NTS){
+    N = length(obs[[i]])
+    for(j in 2:N){ # ignore first state
+      s = states[[i]][j]
+      s_pre = states[[i]][j-1]
+      # calculate state probability
+      prob_s = pi[s_pre,s]
+      ll = ll + log(prob_s)
+      # calculate observation probability
+      y = obs[[i]][j]
+      y_pre = obs[[i]][j-1]
+      prob_o = f(y,y_pre,s,ar,debug)
+      ll = ll + prob_o
+    }
+  }
+  return(ll)
 }

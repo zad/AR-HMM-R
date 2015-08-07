@@ -73,6 +73,10 @@ sn.normalize <- function(sn_list){
       i = i+1
     } 
   }
+#   if(i==1){
+#     print("sn.normalize warning:all inputs are zeros")
+#     return(rep(1,length(sn_list)))
+#   }
   max_exp = max(exp)
   normalized = c()
   for(i in 1:length(sn_list)){
